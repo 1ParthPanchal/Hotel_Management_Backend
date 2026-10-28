@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Distributed;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using CatalogService.Data;
 using CatalogService.Models;
 
@@ -20,6 +21,11 @@ public class CatalogController : ControllerBase
     private readonly IDistributedCache _cache;
     private readonly ILogger<CatalogController> _logger;
     private const int CacheTtlMinutes = 5;
+
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        ReferenceHandler = ReferenceHandler.IgnoreCycles
+    };
 
     public CatalogController(CatalogDbContext db, IDistributedCache cache, ILogger<CatalogController> logger)
     {
@@ -46,14 +52,14 @@ public class CatalogController : ControllerBase
         _logger.LogInformation("Cache MISS for {Key} — loading from DB", cacheKey);
         Response.Headers["X-Cache"] = "MISS";
         var properties = await _db.Properties.Include(p => p.Rooms).ToListAsync();
-        var json = JsonSerializer.Serialize(properties);
+        var json = JsonSerializer.Serialize(properties, _jsonOptions);
 
         await _cache.SetStringAsync(cacheKey, json, new DistributedCacheEntryOptions
         {
             AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(CacheTtlMinutes)
         });
 
-        return Ok(properties);
+        return Content(json, "application/json");
     }
 
     // GET /api/catalog/properties/{id}/rooms
@@ -76,13 +82,13 @@ public class CatalogController : ControllerBase
         var rooms = await _db.Rooms.Where(r => r.PropertyId == id).ToListAsync();
         if (!rooms.Any()) return NotFound($"No rooms found for property {id}");
 
-        var json = JsonSerializer.Serialize(rooms);
+        var json = JsonSerializer.Serialize(rooms, _jsonOptions);
         await _cache.SetStringAsync(cacheKey, json, new DistributedCacheEntryOptions
         {
             AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(CacheTtlMinutes)
         });
 
-        return Ok(rooms);
+        return Content(json, "application/json");
     }
 
     // GET /api/catalog/rooms/{id}
@@ -105,13 +111,13 @@ public class CatalogController : ControllerBase
         var room = await _db.Rooms.FindAsync(id);
         if (room is null) return NotFound();
 
-        var json = JsonSerializer.Serialize(room);
+        var json = JsonSerializer.Serialize(room, _jsonOptions);
         await _cache.SetStringAsync(cacheKey, json, new DistributedCacheEntryOptions
         {
             AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(CacheTtlMinutes)
         });
 
-        return Ok(room);
+        return Content(json, "application/json");
     }
 
     // POST /api/catalog/properties — for testing/admin

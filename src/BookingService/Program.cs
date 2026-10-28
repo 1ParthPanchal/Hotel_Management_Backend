@@ -4,6 +4,8 @@ using Polly.Extensions.Http;
 using BookingService.Data;
 using BookingService.Messaging;
 
+AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
+
 var builder = WebApplication.CreateBuilder(args);
 
 // ── Services ──────────────────────────────────────────────────────────────────
@@ -12,7 +14,10 @@ var connectionString = builder.Configuration.GetConnectionString("BookingDb")
     ?? "Host=localhost;Port=5433;Database=booking_db;Username=localstay;Password=localstay123";
 
 builder.Services.AddDbContext<BookingDbContext>(opt =>
-    opt.UseNpgsql(connectionString));
+{
+    opt.UseNpgsql(connectionString);
+    opt.ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning));
+});
 
 // HttpClient for calling CatalogService to fetch room price at booking time (idempotent GET ONLY)
 // Polly retry policy: exponential backoff 2s / 4s / 8s on transient HTTP errors (5xx, 408)

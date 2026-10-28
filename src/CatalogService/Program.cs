@@ -10,7 +10,10 @@ var connectionString = builder.Configuration.GetConnectionString("CatalogDb")
     ?? "Host=localhost;Port=5433;Database=catalog_db;Username=localstay;Password=localstay123";
 
 builder.Services.AddDbContext<CatalogDbContext>(opt =>
-    opt.UseNpgsql(connectionString));
+{
+    opt.UseNpgsql(connectionString);
+    opt.ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning));
+});
 
 // Redis distributed cache for cache-aside pattern (5-min TTL on catalog data)
 var redisConnection = builder.Configuration["Redis:Connection"] ?? "localhost:6379";
