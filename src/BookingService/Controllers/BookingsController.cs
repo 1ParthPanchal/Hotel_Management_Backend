@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
+using Npgsql;
 using BookingService.Data;
 using BookingService.Models;
 
@@ -9,11 +10,12 @@ namespace BookingService.Controllers;
 /// <summary>
 /// Handles all booking-related API endpoints.
 ///
-/// Key design decisions:
-/// - Availability check uses a DB query, NOT Redis cache (cached availability would show stale data)
-/// - Price is fetched from CatalogService synchronously (strong consistency on price snapshot)
-/// - Booking + Invoice + Outbox are written in ONE database transaction (atomicity)
-/// - Cancel is idempotent: cancelling twice returns the same result
+/// Concurrency Architecture:
+/// - Price is fetched from CatalogService synchronously BEFORE any lock.
+/// - Serializable transaction + pg_advisory_xact_lock(roomId) serializes booking per room.
+/// - Overlap check is re-evaluated INSIDE the lock.
+/// - Any PostgreSQL serialization failure (SqlState 40001) is caught and returned as 409 Conflict.
+/// - Booking + Invoice + OutboxMessage are written in ONE atomic database transaction.
 /// </summary>
 [ApiController]
 [Route("api/bookings")]
@@ -31,8 +33,6 @@ public class BookingsController : ControllerBase
     }
 
     // GET /api/bookings/availability?roomId=1&checkIn=2025-01-01&checkOut=2025-01-05
-    // Returns whether the room is available for the given date range.
-    // NOT cached — always hits the database for real-time accuracy.
     [HttpGet("availability")]
     public async Task<IActionResult> CheckAvailability(int roomId, DateTime checkIn, DateTime checkOut)
     {
@@ -65,30 +65,13 @@ public class BookingsController : ControllerBase
     }
 
     // POST /api/bookings
-    // Creates a booking. Steps:
-    // 1. Validate dates
-    // 2. Check for overlapping confirmed bookings (returns 409 if overlap)
-    // 3. Call CatalogService for price snapshot
-    // 4. Save Booking + Invoice + OutboxMessage in ONE transaction
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] CreateBookingRequest req)
     {
         if (req.CheckIn >= req.CheckOut)
             return BadRequest("Check-in must be before check-out.");
 
-        // Step 2: Check for overlapping bookings
-        // Overlap condition: existing.CheckIn < newCheckOut AND existing.CheckOut > newCheckIn
-        var overlap = await _db.Bookings.AnyAsync(b =>
-            b.RoomId == req.RoomId &&
-            b.Status == BookingStatus.Confirmed &&
-            b.CheckIn < req.CheckOut &&
-            b.CheckOut > req.CheckIn);
-
-        if (overlap)
-            return Conflict(new { error = $"Room {req.RoomId} is already booked for the selected dates. Please choose different dates." });
-
-        // Step 3: Get price from CatalogService (synchronous call for price snapshot)
-        // WHY SYNC: We need the exact price at booking time. An async event might arrive late.
+        // Step 1: Fetch price from CatalogService BEFORE any DB lock
         decimal pricePerNight;
         try
         {
@@ -110,10 +93,27 @@ public class BookingsController : ControllerBase
         var nights = (req.CheckOut - req.CheckIn).Days;
         var totalAmount = pricePerNight * nights;
 
-        // Step 4: Atomic transaction — Booking + Invoice + OutboxMessage all together
-        await using var transaction = await _db.Database.BeginTransactionAsync();
+        // Step 2: Serializable transaction with pg_advisory_xact_lock per room
+        await using var transaction = await _db.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable);
         try
         {
+            // Acquire advisory transaction-scoped lock on RoomId
+            long lockKey = req.RoomId;
+            await _db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock({0});", lockKey);
+
+            // Re-check overlap INSIDE the lock
+            var overlap = await _db.Bookings.AnyAsync(b =>
+                b.RoomId == req.RoomId &&
+                b.Status == BookingStatus.Confirmed &&
+                b.CheckIn < req.CheckOut &&
+                b.CheckOut > req.CheckIn);
+
+            if (overlap)
+            {
+                await transaction.RollbackAsync();
+                return Conflict(new { error = $"Room {req.RoomId} is already booked for the selected dates. Please choose different dates." });
+            }
+
             var booking = new Booking
             {
                 RoomId = req.RoomId,
@@ -124,9 +124,8 @@ public class BookingsController : ControllerBase
                 Status = BookingStatus.Confirmed
             };
             _db.Bookings.Add(booking);
-            await _db.SaveChangesAsync(); // Get the booking ID
+            await _db.SaveChangesAsync();
 
-            // Create invoice (local, no payment gateway)
             var invoice = new Invoice
             {
                 BookingId = booking.Id,
@@ -135,8 +134,6 @@ public class BookingsController : ControllerBase
             };
             _db.Invoices.Add(invoice);
 
-            // Write outbox message IN THE SAME TRANSACTION
-            // The relay will pick this up and publish to RabbitMQ within 5 seconds
             var payload = JsonSerializer.Serialize(new
             {
                 EventId = Guid.NewGuid(),
@@ -156,6 +153,12 @@ public class BookingsController : ControllerBase
             _logger.LogInformation("Booking {Id} created for {Guest}", booking.Id, booking.GuestName);
             return CreatedAtAction(nameof(GetById), new { id = booking.Id }, booking);
         }
+        catch (Exception ex) when (IsSerializationFailure(ex))
+        {
+            await transaction.RollbackAsync();
+            _logger.LogWarning("Concurrent booking conflict (40001) for room {RoomId} on dates {CheckIn} to {CheckOut}", req.RoomId, req.CheckIn, req.CheckOut);
+            return Conflict(new { error = $"Room {req.RoomId} is already booked for the selected dates. Please choose different dates." });
+        }
         catch (Exception ex)
         {
             await transaction.RollbackAsync();
@@ -164,22 +167,28 @@ public class BookingsController : ControllerBase
         }
     }
 
+    private static bool IsSerializationFailure(Exception? ex)
+    {
+        while (ex is not null)
+        {
+            if (ex is PostgresException pex && (pex.SqlState == "40001" || pex.SqlState == "40P01"))
+                return true;
+            ex = ex.InnerException;
+        }
+        return false;
+    }
+
     // POST /api/bookings/{id}/cancel
-    // Cancels a booking. Idempotent — safe to call multiple times.
     [HttpPost("{id}/cancel")]
     public async Task<IActionResult> Cancel(int id)
     {
         var booking = await _db.Bookings.FindAsync(id);
         if (booking is null) return NotFound();
 
-        // Idempotency: if already cancelled, return the same booking (no error)
         if (booking.Status == BookingStatus.Cancelled)
-        {
-            _logger.LogInformation("Booking {Id} was already cancelled — returning existing state", id);
             return Ok(booking);
-        }
 
-        await using var transaction = await _db.Database.BeginTransactionAsync();
+        await using var transaction = await _db.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable);
         try
         {
             booking.Status = BookingStatus.Cancelled;
@@ -211,7 +220,5 @@ public class BookingsController : ControllerBase
     }
 }
 
-// DTO for deserializing room data from CatalogService
 public record RoomDto(int Id, int PropertyId, string Name, decimal PricePerNight, int Capacity);
-
 public record CreateBookingRequest(int RoomId, string GuestName, DateTime CheckIn, DateTime CheckOut);

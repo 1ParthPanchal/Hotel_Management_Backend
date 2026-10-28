@@ -1,11 +1,9 @@
+using System.Text.Json.Serialization;
+
 namespace BookingService.Models;
 
 public enum InvoiceStatus
 {
-    /// <summary>
-    /// ManualUnpaid is the local replacement for a payment gateway.
-    /// In a real system you'd integrate Stripe/Moyasar here.
-    /// </summary>
     ManualUnpaid,
     Paid,
     Refunded
@@ -19,5 +17,6 @@ public class Invoice
     public InvoiceStatus Status { get; set; } = InvoiceStatus.ManualUnpaid;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
+    [JsonIgnore]
     public Booking Booking { get; set; } = null!;
 }

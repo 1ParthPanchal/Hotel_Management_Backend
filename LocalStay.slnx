@@ -3,6 +3,10 @@
     <Project Path="src/ApiGateway/ApiGateway.csproj" />
     <Project Path="src/BookingService/BookingService.csproj" />
     <Project Path="src/CatalogService/CatalogService.csproj" />
+    <Project Path="src/ConciergeService/ConciergeService.csproj" />
     <Project Path="src/NotificationService/NotificationService.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/LocalStay.Tests/LocalStay.Tests.csproj" />
   </Folder>
 </Solution>

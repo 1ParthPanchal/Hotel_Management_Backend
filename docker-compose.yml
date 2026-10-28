@@ -1,0 +1,223 @@
+# LocalStay — Master docker-compose.yml
+# ONE file for: infra (postgres, rabbitmq, redis, mailhog) + all backend services + frontend
+# Run from the solution root: c:\Projects\LocalStay
+#
+# Before first run, stop the old infra stack:
+#   cd infra && docker compose down   (no -v, keeps your data)
+#   cd .. && docker compose up -d --build
+
+services:
+  # ──────────────────────────── INFRASTRUCTURE ──────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: localstay-postgres
+    environment:
+      POSTGRES_USER: localstay
+      POSTGRES_PASSWORD: localstay123
+      POSTGRES_DB: localstay
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-postgres.sql:/docker-entrypoint-initdb.d/init-postgres.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U localstay"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: localstay-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: localstay
+      RABBITMQ_DEFAULT_PASS: localstay123
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: localstay-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: localstay-mailhog
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+  # ──────────────────────────── BACKEND SERVICES ────────────────────────────
+
+  catalogservice:
+    build:
+      context: ./Hotel_Management_Backend
+      dockerfile: src/CatalogService/Dockerfile
+    container_name: localstay-catalog
+    ports:
+      - "5101:8080"
+    environment:
+      # PostgreSQL connection — use container name "postgres" inside Docker
+      - ConnectionStrings__CatalogDb=Host=postgres;Port=5432;Database=catalog_db;Username=localstay;Password=localstay123
+      # Redis — use container name "redis" inside Docker
+      - Redis__Connection=redis:6379
+      - ASPNETCORE_ENVIRONMENT=Production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  bookingservice:
+    build:
+      context: ./Hotel_Management_Backend
+      dockerfile: src/BookingService/Dockerfile
+    container_name: localstay-booking
+    ports:
+      - "5102:8080"
+    environment:
+      - ConnectionStrings__BookingDb=Host=postgres;Port=5432;Database=booking_db;Username=localstay;Password=localstay123
+      # CatalogService address inside Docker (by container name)
+      - Services__CatalogService=http://catalogservice:8080/
+      # RabbitMQ connection via environment variables (read in OutboxRelayService)
+      - RabbitMQ__Host=rabbitmq
+      - RabbitMQ__User=localstay
+      - RabbitMQ__Password=localstay123
+      - ASPNETCORE_ENVIRONMENT=Production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      catalogservice:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  notificationservice:
+    build:
+      context: ./Hotel_Management_Backend
+      dockerfile: src/NotificationService/Dockerfile
+    container_name: localstay-notification
+    ports:
+      - "5103:8080"
+    environment:
+      - ConnectionStrings__NotificationDb=Host=postgres;Port=5432;Database=notification_db;Username=localstay;Password=localstay123
+      - RabbitMQ__Host=rabbitmq
+      - RabbitMQ__User=localstay
+      - RabbitMQ__Password=localstay123
+      - ASPNETCORE_ENVIRONMENT=Production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  conciergeservice:
+    build:
+      context: ./Hotel_Management_Backend
+      dockerfile: src/ConciergeService/Dockerfile
+    container_name: localstay-concierge
+    ports:
+      - "5104:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - Services__CatalogService=http://catalogservice:8080/
+      - Services__BookingService=http://bookingservice:8080/
+      - Ollama__Host=http://host.docker.internal:11434/
+      - Ollama__Model=llama3.1:8b
+      - ASPNETCORE_ENVIRONMENT=Production
+    depends_on:
+      catalogservice:
+        condition: service_healthy
+      bookingservice:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  apigateway:
+    build:
+      context: ./Hotel_Management_Backend
+      dockerfile: src/ApiGateway/Dockerfile
+    container_name: localstay-gateway
+    ports:
+      - "5000:8080"
+    environment:
+      # Override YARP cluster destinations to use Docker service names
+      - ReverseProxy__Clusters__catalog-cluster__Destinations__destination1__Address=http://catalogservice:8080/
+      - ReverseProxy__Clusters__booking-cluster__Destinations__destination1__Address=http://bookingservice:8080/
+      - ReverseProxy__Clusters__notification-cluster__Destinations__destination1__Address=http://notificationservice:8080/
+      - ReverseProxy__Clusters__concierge-cluster__Destinations__destination1__Address=http://conciergeservice:8080/
+      - ASPNETCORE_ENVIRONMENT=Production
+    depends_on:
+      catalogservice:
+        condition: service_healthy
+      bookingservice:
+        condition: service_healthy
+      notificationservice:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ──────────────────────────── FRONTEND ───────────────────────────────────
+
+  frontend:
+    build:
+      context: ./Hotel_Management_Frontend
+      dockerfile: Dockerfile
+    container_name: localstay-frontend
+    ports:
+      - "4200:80"
+    depends_on:
+      - apigateway
+
+# ──────────────────────────── VOLUMES ────────────────────────────────────────
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+  redis_data:
+

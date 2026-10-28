@@ -1,0 +1,68 @@
+### LocalStay API Requests (.http file for VS / VS Code REST Client)
+@gateway = http://localhost:5000
+
+### 1. Gateway Health Check
+GET {{gateway}}/health
+
+### 2. Catalog - Get Properties (First request -> X-Cache: MISS)
+GET {{gateway}}/api/catalog/properties
+
+### 3. Catalog - Get Properties (Second request -> X-Cache: HIT)
+GET {{gateway}}/api/catalog/properties
+
+### 4. Catalog - Get Rooms for Property 1
+GET {{gateway}}/api/catalog/properties/1/rooms
+
+### 5. Booking - Check Room Availability
+GET {{gateway}}/api/bookings/availability?roomId=1&checkIn=2027-06-01&checkOut=2027-06-03
+
+### 6. Booking - Create Booking (Valid)
+POST {{gateway}}/api/bookings
+Content-Type: application/json
+
+{
+  "roomId": 1,
+  "guestName": "John Doe",
+  "guestEmail": "john@example.com",
+  "checkIn": "2027-06-01",
+  "checkOut": "2027-06-03"
+}
+
+### 7. Booking - Duplicate Booking on Same Room/Dates (Should return 409 Conflict)
+POST {{gateway}}/api/bookings
+Content-Type: application/json
+
+{
+  "roomId": 1,
+  "guestName": "Jane Smith",
+  "guestEmail": "jane@example.com",
+  "checkIn": "2027-06-01",
+  "checkOut": "2027-06-03"
+}
+
+### 8. Concierge - Ask Question (Grounded in Real Data)
+POST {{gateway}}/api/concierge/ask
+Content-Type: application/json
+
+{
+  "question": "What is the price and capacity for Deluxe King Suite?",
+  "roomId": 1
+}
+
+### 9. Concierge - Ask Made-Up Room (Grounding Guard Refusal)
+POST {{gateway}}/api/concierge/ask
+Content-Type: application/json
+
+{
+  "question": "Can I book Room 999 in Paris?",
+  "roomId": 999
+}
+
+### 10. Check Individual Services Readiness
+GET http://localhost:5101/health/ready
+###
+GET http://localhost:5102/health/ready
+###
+GET http://localhost:5103/health/ready
+###
+GET http://localhost:5104/health

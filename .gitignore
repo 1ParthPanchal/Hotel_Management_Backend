@@ -1,0 +1,20 @@
+## .NET / Visual Studio
+bin/
+obj/
+*.user
+*.suo
+.vs/
+*.swp
+.DS_Store
+
+## Rider / JetBrains
+.idea/
+
+## NuGet
+*.nupkg
+*.snupkg
+project.lock.json
+project.fragment.lock.json
+
+## Docker
+*.env.local

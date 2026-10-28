@@ -39,10 +39,12 @@ public class CatalogController : ControllerBase
         if (cached is not null)
         {
             _logger.LogInformation("Cache HIT for {Key}", cacheKey);
+            Response.Headers["X-Cache"] = "HIT";
             return Content(cached, "application/json");
         }
 
         _logger.LogInformation("Cache MISS for {Key} — loading from DB", cacheKey);
+        Response.Headers["X-Cache"] = "MISS";
         var properties = await _db.Properties.Include(p => p.Rooms).ToListAsync();
         var json = JsonSerializer.Serialize(properties);
 
@@ -65,9 +67,12 @@ public class CatalogController : ControllerBase
         if (cached is not null)
         {
             _logger.LogInformation("Cache HIT for {Key}", cacheKey);
+            Response.Headers["X-Cache"] = "HIT";
             return Content(cached, "application/json");
         }
 
+        _logger.LogInformation("Cache MISS for {Key} — loading from DB", cacheKey);
+        Response.Headers["X-Cache"] = "MISS";
         var rooms = await _db.Rooms.Where(r => r.PropertyId == id).ToListAsync();
         if (!rooms.Any()) return NotFound($"No rooms found for property {id}");
 
@@ -85,8 +90,28 @@ public class CatalogController : ControllerBase
     [HttpGet("rooms/{id}")]
     public async Task<IActionResult> GetRoom(int id)
     {
+        var cacheKey = $"catalog:room:{id}";
+        var cached = await _cache.GetStringAsync(cacheKey);
+
+        if (cached is not null)
+        {
+            _logger.LogInformation("Cache HIT for {Key}", cacheKey);
+            Response.Headers["X-Cache"] = "HIT";
+            return Content(cached, "application/json");
+        }
+
+        _logger.LogInformation("Cache MISS for {Key} — loading from DB", cacheKey);
+        Response.Headers["X-Cache"] = "MISS";
         var room = await _db.Rooms.FindAsync(id);
-        return room is null ? NotFound() : Ok(room);
+        if (room is null) return NotFound();
+
+        var json = JsonSerializer.Serialize(room);
+        await _cache.SetStringAsync(cacheKey, json, new DistributedCacheEntryOptions
+        {
+            AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(CacheTtlMinutes)
+        });
+
+        return Ok(room);
     }
 
     // POST /api/catalog/properties — for testing/admin

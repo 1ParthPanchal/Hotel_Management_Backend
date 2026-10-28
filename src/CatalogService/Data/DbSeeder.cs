@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using CatalogService.Data;
 using CatalogService.Models;
 
@@ -13,7 +14,7 @@ public static class DbSeeder
     {
         // EnsureCreated creates all tables from the model if they don't exist.
         // Week 1 shortcut — real projects use `dotnet ef migrations add` instead.
-        await db.Database.EnsureCreatedAsync();
+        await db.Database.MigrateAsync();
 
         if (db.Properties.Any()) return; // Already seeded
 
